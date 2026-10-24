@@ -62,3 +62,7 @@ dkms.conf
 
 # macOS Finder metadata
 .DS_Store
+
+# Self setting
+*.pdf
+.vscode
