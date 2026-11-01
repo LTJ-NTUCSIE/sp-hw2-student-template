@@ -14,7 +14,7 @@
 
 Table_entry *table_start;
 int jud_rec_fd, jud_sen_fd;
-char *how_to_receive_from_judge, *how_to_send_to_judge;
+
 
 int main(int argc, char *argv[]) {
   if (argc > 1) {
@@ -29,15 +29,10 @@ int main(int argc, char *argv[]) {
 
   // end TODO
 
-  Message stdin_msg;
-  if (init_msg(&stdin_msg) < 0){
-    perror("calloc_died");
-    return 1;
-  }
-
   table_start = NULL;
 
   /* setup the channel for talking to judge */
+  char *how_to_receive_from_judge, *how_to_send_to_judge;
   how_to_receive_from_judge = getenv("CMD_FIFO");
   how_to_send_to_judge = getenv("RLY_FIFO");
 
@@ -53,8 +48,15 @@ int main(int argc, char *argv[]) {
   else{
     jud_sen_fd = open(how_to_send_to_judge, O_WRONLY);
   }
-  
 
+  Message jud_kara_msg;
+  if (init_msg(&jud_kara_msg) < 0){
+    perror("calloc_died");
+    return 1;
+  }
+  
+  bool exiter = false;
+  int input_status;
   /* Poll and pop commad section */ 
   while (1) {
     char *command_buffer = NULL;
@@ -80,8 +82,8 @@ int main(int argc, char *argv[]) {
       continue;
     }
     else{
-      int input_status;
-      if ((input_status=append_input(poller.fd, &stdin_msg)) == INPUT_ERROR){
+      input_status = append_input(poller.fd, &jud_kara_msg);
+      if (input_status == INPUT_ERROR){
         break;
       }
       if (input_status == INPUT_RETRY){
@@ -97,43 +99,62 @@ int main(int argc, char *argv[]) {
 
     // TODO: classify the command and execute it.
     int pop_status;
-    while ((pop_status=pop_command(&stdin_msg, &command)) > 0){
-      command_handler(&command);
+    while ((pop_status=pop_command(&jud_kara_msg, &command)) > 0){
+      int h_res = command_handler(&command);
       cleanup_command(&command);
+
+      if (h_res == H_EXIT){
+        exiter = true;
+        break;
+      }
+      else if (h_res == H_ERR){
+        fprintf(stderr, "Handler get err");
+      }
     };
+
+    if (exiter){
+      break;
+    }
 
     if (pop_status < 0){
       fprintf(stderr, "pop died\n");
       break;
     }
     
+    if (input_status == INPUT_EOF){
+      break;
+    }
     // end TODO
 
     // TODO: handle custom commands.
 
     // end TODO
   }
+
+  cleanup_msg(&jud_kara_msg);
+  cleanup_table(&table_start);
+  exit(0);
 }
 
 int command_handler(Command *cmd) {
   switch (cmd->type) {
   case CREATE:
-    create_handler(cmd->buf, cmd->len);
+    return create_handler(cmd->buf, cmd->len);
     break;
   case STORE:
-    store_handler(cmd->buf, cmd->len);
+    return store_handler(cmd->buf, cmd->len);
     break;
   case DELETE:
-    delete_handler(cmd->buf, cmd->len);
+    return delete_handler(cmd->buf, cmd->len);
     break;
   case FETCH:
-    fetch_handler(cmd->buf, cmd->len);
+    return fetch_handler(cmd->buf, cmd->len);
     break;
   case KILL:
-    kill_handler(cmd->buf, cmd->len);
+    return kill_handler(cmd->buf, cmd->len);
     break;
   case UPDATE:
-    update_handler(cmd->buf, cmd->len);
+    return update_handler(cmd->buf, cmd->len);
     break;
   default:
     fprintf(stderr, "Unknown command type\n");
@@ -177,21 +198,21 @@ int delete_handler(char *buf, size_t len) {
   // return 0;
 }
 
-int direct_send_fetch_result(char *if_val){
-  size_t total = 0; 
-  size_t val_len = strlen(if_val);
-  while (total < val_len) {
-      ssize_t n = write(jud_sen_fd, if_val + total, val_len - total);
-      if (n > 0) {
-          total += (size_t)n;
-      } else if (n < 0 && errno == EINTR) {
-          continue;  // retry
-      } else {
-          return -1; // real err
-      }
-  }
-  return 0;
-}
+// int direct_send_fetch_result(char *if_val){
+//   size_t total = 0; 
+//   size_t val_len = strlen(if_val);
+//   while (total < val_len) {
+//       ssize_t n = write(jud_sen_fd, if_val + total, val_len - total);
+//       if (n > 0) {
+//           total += (size_t)n;
+//       } else if (n < 0 && errno == EINTR) {
+//           continue;  // retry
+//       } else {
+//           return -1; // real err
+//       }
+//   }
+//   return 0;
+// }
 
 int get_ans_from_consultant(char *key){
   char *is_root = getenv("CMD_FIFO");
@@ -221,14 +242,17 @@ int get_ans_from_consultant(char *key){
         execl(consult,"consultant",NULL);
 
         perror("consult exec died");
+        _exit(1);
         return -1;
       }
       else{ //SP main
         close(pc_pipe_fd[0]); close(cp_pipe_fd[1]);
         if ( write_msg_to_fd(pc_pipe_fd[1], key) < 0){
+          close(pc_pipe_fd[1]); close(cp_pipe_fd[0]);
           return -1;
         }
         if ( write_msg_to_fd(pc_pipe_fd[1], "\n") < 0){
+          close(pc_pipe_fd[1]); close(cp_pipe_fd[0]);
           return -1;
         }
         close(pc_pipe_fd[1]);
@@ -248,6 +272,7 @@ int get_ans_from_consultant(char *key){
             }
             else{
               free(line);
+              line = NULL;
               break;
             }
           }
@@ -256,6 +281,8 @@ int get_ans_from_consultant(char *key){
             break;
           }
         }
+        cleanup_msg(&c_res);
+        close(cp_pipe_fd[0]);
         waitpid(pid, NULL, 0);
       }
     }
@@ -263,7 +290,9 @@ int get_ans_from_consultant(char *key){
     write_msg_to_fd(jud_sen_fd, line+4); //之後要改成給Target child
     write_msg_to_fd(jud_sen_fd, "\n");
     cleanup_msg(&c_res);
-    free(line);
+    if (line != NULL){
+      free(line);
+    }
   }
   else{ // not sp main, should ask parent
 
@@ -281,8 +310,13 @@ int fetch_handler(char *buf, size_t len) {
   char *hash = &(buf[6]); 
   char *key = &(buf[token_len+1]);
   char *if_val; int success_search=-1;
-  if ((success_search=search_in_table(table_start,key,&if_val)) == 0 && if_val != NULL){
-    return direct_send_fetch_result(if_val);
+  if ((success_search=search_in_table(&table_start,key,&if_val)) == 0 && if_val != NULL){
+    write_msg_to_fd(jud_sen_fd, hash);
+    write_msg_to_fd(jud_sen_fd, " ");
+    write_msg_to_fd(jud_sen_fd, if_val);
+    write_msg_to_fd(jud_sen_fd, "\n");
+    return 0;
+    // return direct_send_fetch_result(if_val);
   }
   else if (success_search == 0 && if_val == NULL){
     write_msg_to_fd(jud_sen_fd, hash);
@@ -298,7 +332,8 @@ int fetch_handler(char *buf, size_t len) {
 
 int kill_handler(char *buf, size_t len) {
   // TODO: Implement the KILL command handler.
-  return 0;
+  (void) buf; (void) len;
+  return H_EXIT;
 }
 
 int update_handler(char *buf, size_t len) {

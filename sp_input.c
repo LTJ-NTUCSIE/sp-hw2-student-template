@@ -30,17 +30,19 @@ int check_if_current_len_is_enough(Message* m){
   size_t nec_size = m->not_processed_len + m->read_len + 1;
 
   if (nec_size > m->current_buf_capa){
-    while(m->current_buf_capa < nec_size){
-      m->current_buf_capa = m->current_buf_capa*2;
+    size_t new_capa = m->current_buf_capa;
+    while(new_capa < nec_size){
+      new_capa = new_capa*2;
     }
 
     char *new_buf;
-    if ((new_buf = realloc(m->not_processed_buf, m->current_buf_capa)) == NULL){
+    if ((new_buf = realloc(m->not_processed_buf, new_capa)) == NULL){
       perror("increase realloc died");
       return -1;
     }
 
     m->not_processed_buf = new_buf;
+    m->current_buf_capa = new_capa;
     return 0;
   }
 
@@ -48,20 +50,22 @@ int check_if_current_len_is_enough(Message* m){
 } 
 
 int shrink_current_length(Message* m){
-  size_t nec_size = m->not_processed_len + m->read_len + 1;
+  size_t nec_size = m->not_processed_len + 1;
 
-  if (m->current_buf_capa > 2*nec_size){
-    while (m->current_buf_capa > 2*nec_size){
-      m->current_buf_capa = m->current_buf_capa/2;
+  if (m->current_buf_capa > INIT_MSG_BUF_SIZE && m->current_buf_capa > 2*nec_size){
+    size_t new_capa = m->current_buf_capa;
+    while (new_capa > INIT_MSG_BUF_SIZE && new_capa > 2*nec_size){
+      new_capa = new_capa/2;
     }
 
-    char *new_buf = realloc(m->not_processed_buf, m->current_buf_capa);
+    char *new_buf = realloc(m->not_processed_buf, new_capa);
     if (new_buf == NULL){
       perror("shrink realloc died");
       return -1;
     }
 
     m->not_processed_buf = new_buf;
+    m->current_buf_capa = new_capa;
     return 0;
   }
   
@@ -85,6 +89,7 @@ int append_input(int fd, Message* m) {
     return INPUT_ERROR;
   }
   else if (read_status == 0){ //EOF
+    m -> read_len = 0;
     return INPUT_EOF; 
   }
 
@@ -143,32 +148,46 @@ void cleanup_command(Command *c){
 }
 
 int pop_command(Message *m, Command *c) {
-    char *newline = memchr(m->not_processed_buf, '\n', m->not_processed_len);
-    if (newline == NULL) {
-        return 0;
-    }
-    size_t consumed = (size_t)(newline - m->not_processed_buf) + 1;
-    size_t len = consumed - 1;
-    if (len > 0 && m->not_processed_buf[len - 1] == '\r') {
-        --len;
-    }
-    // if (len + 1 > out_size) {
-    //     return -1;
+  char *line = NULL;
+  int pop_status;
+  if ((pop_status=pop_line(m,&line)) < 0){
+    return -1;
+  }
+  else if (pop_status == 0){
+    return 0;
+  }
+  else{
+    c->buf = line; c->len = strlen(line); c->type = classify_command(c->buf, c->len);
+    return 1;
+  }
+
+  return 0;
+    // char *newline = memchr(m->not_processed_buf, '\n', m->not_processed_len);
+    // if (newline == NULL) {
+    //     return 0;
+    // }
+    // size_t consumed = (size_t)(newline - m->not_processed_buf) + 1;
+    // size_t len = consumed - 1;
+    // if (len > 0 && m->not_processed_buf[len - 1] == '\r') {
+    //     --len;
+    // }
+    // // if (len + 1 > out_size) {
+    // //     return -1;
+    // // }
+
+    // char *line;
+    // if ((line= malloc(len+1)) == NULL){
+    //   perror("Malloc died");
+    //   return -1;
     // }
 
-    char *line;
-    if ((line= malloc(len+1)) == NULL){
-      perror("Malloc died");
-      return -1;
-    }
-
-    memcpy(line, m->not_processed_buf, len);
-    line[len] = '\0';
-    memmove(m->not_processed_buf, m->not_processed_buf + consumed, m->not_processed_len - consumed);
-    m->not_processed_len -= consumed;
-
-    c->buf = line; c->len = len; c->type=classify_command(line,len);
-    return 1;
+    // memcpy(line, m->not_processed_buf, len);
+    // line[len] = '\0';
+    // memmove(m->not_processed_buf, m->not_processed_buf + consumed, m->not_processed_len - consumed);
+    // m->not_processed_len -= consumed;
+    // shrink_current_length(m);
+    // c->buf = line; c->len = len; c->type=classify_command(line,len);
+    // return 1;
 }
 
 int write_msg_to_fd(int fd, char *msg){
@@ -211,7 +230,7 @@ int pop_line(Message *m, char **res_line){
   line[len] = '\0';
   memmove(m->not_processed_buf, m->not_processed_buf + consumed, m->not_processed_len - consumed);
   m->not_processed_len -= consumed;
-
+  shrink_current_length(m);
   *res_line = line;
   return 1;
 }

@@ -17,6 +17,13 @@ int fetch_handler(char *buf, size_t len);
 int kill_handler(char *buf, size_t len);
 int update_handler(char *buf, size_t len);
 
+// handler stats :(
+enum handler_status {
+  H_ERR = -1,
+  H_OK = 0,
+  H_EXIT = 1
+};
+
 
 //-------------------------For input-----------------------------------
 //------------------------------------------------------------------
