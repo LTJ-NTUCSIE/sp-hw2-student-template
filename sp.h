@@ -17,7 +17,11 @@ int fetch_handler(char *buf, size_t len);
 int kill_handler(char *buf, size_t len);
 int update_handler(char *buf, size_t len);
 
+
+//-------------------------For input-----------------------------------
+//------------------------------------------------------------------
 #define READ_BUF_SIZE 4096
+#define INIT_MSG_BUF_SIZE 32
 
 typedef struct message{
   char read_buf[READ_BUF_SIZE];
@@ -35,9 +39,31 @@ enum input_status {
 };
 
 int init_msg(Message *m);
+int cleanup_msg(Message *m);
 int append_input(int fd, Message *m);
 int classify_command(char *line, size_t len);
 void cleanup_command(Command *c);
 int pop_command(Message *m, Command *c);
+int write_msg_to_fd(int fd, char *msg);
+int pop_line(Message *m, char** res_line);
+int shrink_current_length(Message* m);
+
+
+//-----------------------For lookup table-----------------------------
+//-------------------------------------------------------------------
+typedef struct table_entry{
+  char* key;
+  char* val;
+  size_t key_len;
+  size_t val_len;
+  struct table_entry* next;
+} Table_entry;
+
+// int init_table(Table_entry **table_start);
+int new_table_entry(Table_entry **table_start, char* key, char* val);
+int update_table_entry(Table_entry **table_start, char* key, char* val);
+int kick_table_entry(Table_entry **table_start, char* key);
+int search_in_table(Table_entry **table_start, char* key, char** if_val);
+void cleanup_table(Table_entry **table_start);
 
 #endif // SP_H
