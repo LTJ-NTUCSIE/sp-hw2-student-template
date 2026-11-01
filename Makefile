@@ -4,14 +4,14 @@ STUDENT_ID = b13902047
 
 # The files you submit besides this Makefile, which is always included. List
 # every source and header that sp is built from.
-SUBMISSION_FILES = sp.c sp.h sp_input.c sp_table.c
+SUBMISSION_FILES = sp.c sp.h sp_input.c sp_table.c sp_output.c
 
 # Build sp. Change this rule and `clean` as you like, for example to compile
 # more sources or add flags.
 
 CC = gcc
 
-SOURCES = sp.c sp_input.c sp_table.c
+SOURCES = sp.c sp_input.c sp_table.c sp_output.c
 OBJECTS = $(SOURCES:.c=.o)
 
 sp: $(OBJECTS)

@@ -2,6 +2,7 @@
 #define SP_H
 
 #include <stdio.h>
+#include <sys/types.h>
 
 typedef struct {
   char *buf;
@@ -45,15 +46,30 @@ enum input_status {
     INPUT_RETRY = 2
 };
 
+enum fd_enum{JUD_IN=0, JUD_OUT, PAR_IN, PAR_OUT};
+
 int init_msg(Message *m);
 int cleanup_msg(Message *m);
 int append_input(int fd, Message *m);
 int classify_command(char *line, size_t len);
 void cleanup_command(Command *c);
 int pop_command(Message *m, Command *c);
-int write_msg_to_fd(int fd, char *msg);
+// int write_msg_to_fd(int fd, char *msg);
 int pop_line(Message *m, char** res_line);
 int shrink_current_length(Message* m);
+
+//-----------------------For output to fd-----------------------
+//-----------------------------------------------------------
+typedef struct outputer{
+  char *buf;
+  size_t total_len;
+  size_t processed_len;
+  struct outputer *next;
+}Outputer;
+
+int try_to_write(Outputer *o, int fd);
+int complete_write(Outputer **s, Outputer **e);
+int add_fetch_outputer(Outputer **head, Outputer **tail, char *hash, char* val);
 
 
 //-----------------------For lookup table-----------------------------
@@ -72,5 +88,28 @@ int update_table_entry(Table_entry **table_start, char* key, char* val);
 int kick_table_entry(Table_entry **table_start, char* key);
 int search_in_table(Table_entry **table_start, char* key, char** if_val);
 void cleanup_table(Table_entry **table_start);
+
+//----------------Consultant comm-------------------
+//--------------------------------------------------
+typedef struct consultant_chat{
+  pid_t cons_pid;
+  int reply_child;
+
+  int send_fd;
+  int recv_fd;
+
+  char *key;
+  char *hash;
+  Outputer *send_first;
+  
+  Message *cons_res;
+  char *cons_res_line;
+  enum {SEND_KEY, RECEIVING, REAP} state;
+  struct consultant_chat *next;
+}Cons_chat;
+void end_a_cons_chat(Cons_chat *c);
+int start_a_cons_chat(char *hash, char *key);
+int cons_chat_hantei(Cons_chat *c);
+int get_ans_from_ue(char *hash, char *key);
 
 #endif // SP_H
