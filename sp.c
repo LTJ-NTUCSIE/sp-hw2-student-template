@@ -191,7 +191,7 @@ int main(int argc, char *argv[]) {
       chat_walker = chat_walker->next;
     }
 
-    // Check Every Command
+    // Check Every FD
     int poll_result; int timeout = 10;
     if ((poll_result = poll(poller_for_all, poller_n, timeout)) < 0 ){
       if (errno == EINTR) {
@@ -242,21 +242,28 @@ int main(int argc, char *argv[]) {
         break;
       }
       else if ((poller_for_all[par_rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
-        input_status = append_input(poller_for_all[par_rec_poller_id].fd, &par_kara_msg);
-        if (input_status == INPUT_ERROR){
+        int parent_input_status;
+        parent_input_status = append_input(poller_for_all[par_rec_poller_id].fd, &par_kara_msg);
+        if (parent_input_status == INPUT_ERROR){
           break;
         }
-        char* parent_res = NULL;
-        while (pop_line(&par_kara_msg, &parent_res) > 0){
-          size_t cutter = 0;
-          size_t par_res_len = strlen(parent_res);
-          while (cutter < par_res_len && parent_res[cutter] != ' ') {
-            cutter++;
-          }
-          parent_res[cutter] = '\0';
-          fetch_thing_to_where_hantei(parent_res, parent_res+cutter+1);
-          free(parent_res);
+        else if (parent_input_status == INPUT_EOF){
+          break;
         }
+        else{
+          char* parent_res = NULL;
+          while (pop_line(&par_kara_msg, &parent_res) > 0){
+            size_t cutter = 0;
+            size_t par_res_len = strlen(parent_res);
+            while (cutter < par_res_len && parent_res[cutter] != ' ') {
+              cutter++;
+            }
+            parent_res[cutter] = '\0';
+            fetch_thing_to_where_hantei(parent_res, parent_res+cutter+1);
+            free(parent_res);
+          }
+        }
+        
       }
       // Reply to parent
       if (par_out_head != NULL){
@@ -285,24 +292,27 @@ int main(int argc, char *argv[]) {
         break;
       }
       else if ((poller_for_all[child_walker->rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
-        input_status = append_input(poller_for_all[child_walker->rec_poller_id].fd, child_walker->msg_from_child);
-        if (input_status == INPUT_ERROR){
+        int child_input_status;
+        child_input_status = append_input(poller_for_all[child_walker->rec_poller_id].fd, child_walker->msg_from_child);
+        if (child_input_status == INPUT_ERROR){
           break;
         }
-        else if (input_status == INPUT_EOF){
+        else if (child_input_status == INPUT_EOF){
           wipe_out_a_child(child_walker);
-          break;
+          // break;
         }
-        char* child_req = NULL;
-        while (pop_line(child_walker->msg_from_child, &child_req) > 0){
-          size_t cutter = 0;
-          size_t chi_res_len = strlen(child_req);
-          while (cutter < chi_res_len && child_req[cutter] != ' ') {
-            cutter++;
+        else{
+          char* child_req = NULL;
+          while (pop_line(child_walker->msg_from_child, &child_req) > 0){
+            size_t cutter = 0;
+            size_t chi_res_len = strlen(child_req);
+            while (cutter < chi_res_len && child_req[cutter] != ' ') {
+              cutter++;
+            }
+            child_req[cutter] = '\0';
+            check_a_child_req(child_req, child_req+cutter+1, child_walker);
+            free(child_req);
           }
-          child_req[cutter] = '\0';
-          check_a_child_req(child_req, child_req+cutter+1, child_walker);
-          free(child_req);
         }
       }
 
@@ -352,8 +362,8 @@ int main(int argc, char *argv[]) {
           break;
         }
         else if ((poller_for_all[chat_walker->rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
-          int cons_read_status = append_input(chat_walker->recv_fd, chat_walker->cons_res);
-          if (cons_read_status == INPUT_ERROR){
+          int cons_input_status = append_input(chat_walker->recv_fd, chat_walker->cons_res);
+          if (cons_input_status == INPUT_ERROR){
             chat_walker->state = REAP;
           }
 
@@ -361,7 +371,7 @@ int main(int argc, char *argv[]) {
             chat_walker->state = REAP;
           }
 
-          if (cons_read_status == INPUT_EOF){
+          if (cons_input_status == INPUT_EOF){
             chat_walker->state = REAP;
           }
         }        
