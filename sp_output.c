@@ -6,21 +6,21 @@
 #include <errno.h>
 #include <string.h>
 
-int add_fetch_outputer(Outputer **head, Outputer **tail, char *hash, char* val){
+int add_fetch_outputer(Outputer **head, Outputer **tail, char *hash, char* vorp_to_say){
   Outputer *new_outer = (Outputer *) malloc(sizeof(Outputer));
   if (new_outer == NULL){
     return -1;
   }
   size_t hash_len = strlen(hash);
-  size_t val_len = strlen(val);
-  new_outer->total_len = hash_len+val_len+2;
+  size_t vorp_len = strlen(vorp_to_say);
+  new_outer->total_len = hash_len+vorp_len+2;
   new_outer->processed_len = 0;
   new_outer->next = NULL;
   new_outer->buf = (char *)malloc(new_outer -> total_len);
   memcpy(new_outer->buf, hash, hash_len);
   memcpy(new_outer->buf+hash_len, " ", 1);
-  memcpy(new_outer->buf+hash_len+1, val, val_len);
-  memcpy(new_outer->buf+hash_len+1+val_len, "\n", 1);
+  memcpy(new_outer->buf+hash_len+1, vorp_to_say, vorp_len);
+  memcpy(new_outer->buf+hash_len+1+vorp_len, "\n", 1);
   
   if (*tail == NULL){
     (*head) = new_outer;
@@ -57,5 +57,11 @@ int complete_write(Outputer **s, Outputer **e){
   }
   free(temp->buf);
   free(temp);
+  return 0;
+}
+
+int cleanup_outputer(Outputer *o){
+  free(o->buf);
+  free(o);
   return 0;
 }

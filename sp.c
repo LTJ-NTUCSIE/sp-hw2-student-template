@@ -12,13 +12,28 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+
+bool is_sp_main;
 Table_entry *table_start;
-Outputer *jud_out_head; Outputer *jud_out_tail;
-Cons_chat *chat_head; Cons_chat *chat_tail;
-Message jud_kara_msg, jud_e_msg;
+
 int jud_rec_fd, jud_sen_fd;
-struct pollfd poller_for_all[70]; int poller_n;
-int jud_sen_poller_id, cons_rec_poller_id, cons_sen_poller_id;
+Message jud_kara_msg;
+Outputer *jud_out_head; Outputer *jud_out_tail;
+int jud_sen_poller_id, jud_rec_poller_id;
+
+int par_rec_fd, par_sen_fd; //Child: stdio; SP main:NULL
+Message par_kara_msg;
+Outputer *par_out_head; Outputer *par_out_tail;
+int par_sen_poller_id, par_rec_poller_id;
+
+Child *child_head;
+
+Cons_chat *chat_head; //Cons_chat *chat_tail;
+// int cons_rec_poller_id, cons_sen_poller_id; // Maybe switch to use the one in cons struct.
+
+Lookupreq *lookup_head;
+
+struct pollfd poller_for_all[128]; int poller_n;
 // struct pollfd judge_poller[2]; int judge_n;
 // struct pollfd parent_poller[2]; int parent_n;
 // struct pollfd children_poller[64]; int children_n;
@@ -38,40 +53,63 @@ int main(int argc, char *argv[]) {
 
   // end TODO
 
+  is_sp_main = (getenv("CMD_FIFO") == NULL);
+
   table_start = NULL;
   jud_out_head = NULL;
   jud_out_tail = NULL;
   chat_head = NULL;
-  chat_tail = NULL;
+  // chat_tail = NULL;
+  par_out_head = NULL;
+  par_out_tail = NULL;
 
   /* setup the channel for talking to judge */
   char *how_to_receive_from_judge, *how_to_send_to_judge;
   how_to_receive_from_judge = getenv("CMD_FIFO");
   how_to_send_to_judge = getenv("RLY_FIFO");
 
-  if (how_to_receive_from_judge == NULL){
+  if (is_sp_main){
     jud_rec_fd = STDIN_FILENO;
-  }
-  else{
-    jud_rec_fd = open(how_to_receive_from_judge, O_RDONLY);
-  }
-  if (how_to_send_to_judge == NULL){
+    fcntl(jud_rec_fd, F_SETFD, FD_CLOEXEC);
+
     jud_sen_fd = STDOUT_FILENO;
+    fcntl(jud_sen_fd, F_SETFD, FD_CLOEXEC);
   }
   else{
+    par_rec_fd = STDIN_FILENO;
+    mkfifo(how_to_receive_from_judge, 0666);
+    par_sen_fd = STDOUT_FILENO;
+    mkfifo(how_to_send_to_judge, 0666);
+
+    jud_rec_fd = open(how_to_receive_from_judge, O_RDONLY);
+    fcntl(jud_rec_fd, F_SETFD, FD_CLOEXEC);
+    fcntl(par_rec_fd, F_SETFD, FD_CLOEXEC);
+    unlink(how_to_receive_from_judge);
+
     jud_sen_fd = open(how_to_send_to_judge, O_WRONLY);
+    fcntl(jud_sen_fd, F_SETFD, FD_CLOEXEC);
+    fcntl(par_sen_fd, F_SETFD, FD_CLOEXEC);
+    unlink(how_to_send_to_judge);
   }
+  
+  
+  int flags;
+  flags = fcntl(jud_rec_fd, F_GETFL, 0);
+  fcntl(jud_rec_fd, F_SETFL, flags | O_NONBLOCK);
+
+  flags = fcntl(jud_sen_fd, F_GETFL, 0);
+  fcntl(jud_sen_fd, F_SETFL, flags | O_NONBLOCK);
 
   if (init_msg(&jud_kara_msg) < 0) {
+    return 1;
+  }
+  if (!is_sp_main && init_msg(&par_kara_msg) < 0) {
     return 1;
   }
 
   bool exiter = false;
   int input_status = INPUT_RETRY, output_status;
-  poller_n = 1;
-  poller_for_all[0].fd = jud_rec_fd; 
-  poller_for_all[0].events = POLLIN;
-  poller_for_all[0].revents = 0;
+  
   // judge_n = 2;
   // judge_poller[0].fd = jud_rec_fd; judge_poller[0].events = POLLIN;
   // judge_poller[1].fd = jud_sen_fd; judge_poller[1].events = 0;
@@ -81,7 +119,14 @@ int main(int argc, char *argv[]) {
     Command command = {.buf = command_buffer, .len = 0, .type = UNKNOWN};
     // TODO: poll the STDIO/FIFO for commands.
     // struct pollfd poller = {.fd = jud_rec_fd, .events = POLLIN};
-    poller_n = 1;
+    if (true){ //read judge
+      poller_n = 0;
+      poller_for_all[poller_n].fd = jud_rec_fd; 
+      poller_for_all[poller_n].events = POLLIN;
+      poller_for_all[poller_n].revents = 0;
+      jud_rec_poller_id = poller_n;
+      poller_n++;
+    }
     if (jud_out_head != NULL){
       poller_for_all[poller_n].fd = jud_sen_fd;
       poller_for_all[poller_n].events = POLLOUT;
@@ -89,23 +134,65 @@ int main(int argc, char *argv[]) {
       jud_sen_poller_id = poller_n;
       poller_n++;
     }
-    if (chat_head != NULL){
-      if (chat_head->state == SEND_KEY){
-        poller_for_all[poller_n].fd = chat_head->send_fd;
-        poller_for_all[poller_n].events = POLLOUT;
-        poller_for_all[poller_n].revents = 0;
-        cons_sen_poller_id = poller_n;
-        poller_n++;
-      }
-      else if(chat_head->state == RECEIVING){
-        poller_for_all[poller_n].fd = chat_head->recv_fd;
+    if (!is_sp_main){
+      if (true){
+        poller_for_all[poller_n].fd = par_rec_fd;
         poller_for_all[poller_n].events = POLLIN;
         poller_for_all[poller_n].revents = 0;
-        cons_rec_poller_id = poller_n;
+        par_rec_poller_id = poller_n;
+        poller_n++;
+      }
+      if (par_out_head != NULL){
+        poller_for_all[poller_n].fd = par_sen_fd;
+        poller_for_all[poller_n].events = POLLOUT;
+        poller_for_all[poller_n].revents = 0;
+        par_sen_poller_id = poller_n;
         poller_n++;
       }
     }
-    int poll_result; int timeout = 100;
+    
+    Child* child_walker = child_head;
+    while (child_walker != NULL){
+      if (true){
+        poller_for_all[poller_n].fd = child_walker->from_child_fd;
+        poller_for_all[poller_n].events = POLLIN;
+        poller_for_all[poller_n].revents = 0;
+        child_walker->rec_poller_id = poller_n;
+        poller_n++;
+      }
+      if (child_walker->out_to_child_head != NULL){
+        poller_for_all[poller_n].fd = child_walker->to_child_fd;
+        poller_for_all[poller_n].events = POLLOUT;
+        poller_for_all[poller_n].revents = 0;
+        child_walker->sen_poller_id = poller_n;
+        poller_n++;
+      } 
+
+      child_walker = child_walker->next;
+    }
+
+    Cons_chat *chat_walker = chat_head;
+    while (chat_walker != NULL){
+      if (chat_walker->state == SEND_KEY){
+        poller_for_all[poller_n].fd = chat_walker->send_fd;
+        poller_for_all[poller_n].events = POLLOUT;
+        poller_for_all[poller_n].revents = 0;
+        chat_walker->sen_poller_id = poller_n;
+        poller_n++;
+      }
+      else if(chat_walker->state == RECEIVING){
+        poller_for_all[poller_n].fd = chat_walker->recv_fd;
+        poller_for_all[poller_n].events = POLLIN;
+        poller_for_all[poller_n].revents = 0;
+        chat_walker->rec_poller_id = poller_n;
+        poller_n++;
+      }
+
+      chat_walker = chat_walker->next;
+    }
+
+    // Check Every Command
+    int poll_result; int timeout = 10;
     if ((poll_result = poll(poller_for_all, poller_n, timeout)) < 0 ){
       if (errno == EINTR) {
         continue;
@@ -117,18 +204,18 @@ int main(int argc, char *argv[]) {
     }
 
     // Read command
-    if (poller_for_all[0].revents & (POLLERR | POLLNVAL)){
+    if (poller_for_all[jud_rec_poller_id].revents & (POLLERR | POLLNVAL)){
       fprintf(stderr, "poll error\n");
       break;
     }
-    else if ((poller_for_all[0].revents & (POLLIN | POLLHUP)) != 0){
-      input_status = append_input(poller_for_all[0].fd, &jud_kara_msg);
+    else if ((poller_for_all[jud_rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
+      input_status = append_input(poller_for_all[jud_rec_poller_id].fd, &jud_kara_msg);
       if (input_status == INPUT_ERROR){
         break;
       }
-      if (input_status == INPUT_RETRY){
-        continue;
-      }
+      // if (input_status == INPUT_RETRY){
+      //   continue;
+      // }
     }
     // Reply to judge
     if (jud_out_head != NULL){
@@ -137,88 +224,177 @@ int main(int argc, char *argv[]) {
         break;
       }
       else if ((poller_for_all[jud_sen_poller_id].revents & (POLLOUT | POLLHUP)) !=0 ){
-        if (jud_out_head != NULL){
-          try_to_write(jud_out_head,jud_sen_fd);
+        try_to_write(jud_out_head,jud_sen_fd);
 
-          if (jud_out_head->processed_len == jud_out_head->total_len){
-            complete_write(&jud_out_head, &jud_out_tail);
-            if (jud_out_head == NULL){
-              poller_for_all[jud_sen_poller_id].events = 0;
+        if (jud_out_head->processed_len == jud_out_head->total_len){
+          complete_write(&jud_out_head, &jud_out_tail);
+          if (jud_out_head == NULL){
+            poller_for_all[jud_sen_poller_id].events = 0;
+          }
+        }
+      }
+    }
+
+    if (!is_sp_main){
+      // receive from parent
+      if (poller_for_all[par_rec_poller_id].revents & (POLLERR | POLLNVAL)){
+        fprintf(stderr, "poll error\n");
+        break;
+      }
+      else if ((poller_for_all[par_rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
+        input_status = append_input(poller_for_all[par_rec_poller_id].fd, &par_kara_msg);
+        if (input_status == INPUT_ERROR){
+          break;
+        }
+        char* parent_res = NULL;
+        while (pop_line(&par_kara_msg, &parent_res) > 0){
+          size_t cutter = 0;
+          size_t par_res_len = strlen(parent_res);
+          while (cutter < par_res_len && parent_res[cutter] != ' ') {
+            cutter++;
+          }
+          parent_res[cutter] = '\0';
+          fetch_thing_to_where_hantei(parent_res, parent_res+cutter+1);
+          free(parent_res);
+        }
+      }
+      // Reply to parent
+      if (par_out_head != NULL){
+        if (poller_for_all[par_sen_poller_id].revents & (POLLERR | POLLNVAL)){
+          fprintf(stderr, "poll error\n");
+          break;
+        }
+        else if ((poller_for_all[par_sen_poller_id].revents & (POLLOUT | POLLHUP)) !=0 ){
+          try_to_write(par_out_head, par_sen_fd);
+
+          if (par_out_head->processed_len == par_out_head->total_len){
+            complete_write(&par_out_head, &par_out_tail);
+            if (par_out_head == NULL){
+              poller_for_all[par_sen_poller_id].events = 0;
             }
           }
         }
       }
     }
 
-    // end TODO
+    child_walker = child_head;
+    while (child_walker != NULL){
+      if (poller_for_all[child_walker->rec_poller_id].revents & (POLLERR | POLLNVAL)){
+        exiter = true;
+        fprintf(stderr, "poll error\n");
+        break;
+      }
+      else if ((poller_for_all[child_walker->rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
+        input_status = append_input(poller_for_all[child_walker->rec_poller_id].fd, child_walker->msg_from_child);
+        if (input_status == INPUT_ERROR){
+          break;
+        }
+        else if (input_status == INPUT_EOF){
+          wipe_out_a_child(child_walker);
+          break;
+        }
+        char* child_req = NULL;
+        while (pop_line(child_walker->msg_from_child, &child_req) > 0){
+          size_t cutter = 0;
+          size_t chi_res_len = strlen(child_req);
+          while (cutter < chi_res_len && child_req[cutter] != ' ') {
+            cutter++;
+          }
+          child_req[cutter] = '\0';
+          check_a_child_req(child_req, child_req+cutter+1, child_walker);
+          free(child_req);
+        }
+      }
 
-    if (chat_head != NULL){
-      if (chat_head->state == SEND_KEY){
-        if (poller_for_all[cons_sen_poller_id].revents & (POLLERR | POLLNVAL)){
+      if (child_walker->out_to_child_head != NULL){
+        if (poller_for_all[child_walker->sen_poller_id].revents & (POLLERR | POLLNVAL)){
           fprintf(stderr, "poll error\n");
           break;
         }
-        else if ((poller_for_all[cons_sen_poller_id].revents & (POLLOUT | POLLHUP)) != 0){
-          try_to_write(chat_head->send_first,chat_head->send_fd);
+        else if ((poller_for_all[child_walker->sen_poller_id].revents & (POLLOUT | POLLHUP)) !=0 ){
+          try_to_write(child_walker->out_to_child_head, child_walker->to_child_fd);
 
-          if (chat_head->send_first->processed_len == chat_head->send_first->total_len){
-            close(chat_head->send_fd);
-            chat_head->send_fd = -1;
-            chat_head->state = RECEIVING;
+          if (child_walker->out_to_child_head->processed_len == child_walker->out_to_child_head->total_len){
+            complete_write(&child_walker->out_to_child_head, &child_walker->out_to_child_tail);
+            if (child_walker->out_to_child_head == NULL){
+              poller_for_all[child_walker->sen_poller_id].events = 0;
+            }
+          }
+        }
+      }
+      
+      child_walker = child_walker->next;
+    }
+
+    // end TODO
+
+    chat_walker = chat_head;
+    while (chat_walker != NULL){
+      if (chat_walker->state == SEND_KEY){
+        if (poller_for_all[chat_walker->sen_poller_id].revents & (POLLERR | POLLNVAL)){
+          fprintf(stderr, "poll error\n");
+          break;
+        }
+        else if ((poller_for_all[chat_walker->sen_poller_id].revents & (POLLOUT | POLLHUP)) != 0){
+          try_to_write(chat_walker->send_first,chat_walker->send_fd);
+
+          if (chat_walker->send_first->processed_len == chat_walker->send_first->total_len){
+            close(chat_walker->send_fd);
+            chat_walker->send_fd = -1;
+            chat_walker->state = RECEIVING;
           }
         }
         
       }
-      else if(chat_head->state == RECEIVING){
-        if (poller_for_all[cons_rec_poller_id].revents & (POLLERR | POLLNVAL)){
+      else if(chat_walker->state == RECEIVING){
+        if (poller_for_all[chat_walker->rec_poller_id].revents & (POLLERR | POLLNVAL)){
           fprintf(stderr, "poll error\n");
           break;
         }
-        else if ((poller_for_all[cons_rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
-          int status = append_input(chat_head->recv_fd, chat_head->cons_res);
-          if (status == INPUT_ERROR){
-            chat_head->state = REAP;
+        else if ((poller_for_all[chat_walker->rec_poller_id].revents & (POLLIN | POLLHUP)) != 0){
+          int cons_read_status = append_input(chat_walker->recv_fd, chat_walker->cons_res);
+          if (cons_read_status == INPUT_ERROR){
+            chat_walker->state = REAP;
           }
 
-          if (pop_line(chat_head->cons_res, &(chat_head->cons_res_line)) == 1){
-            chat_head->state = REAP;
+          if (pop_line(chat_walker->cons_res, &(chat_walker->cons_res_line)) == 1){
+            chat_walker->state = REAP;
           }
 
-          if (status == INPUT_EOF){
-            chat_head->state = REAP;
+          if (cons_read_status == INPUT_EOF){
+            chat_walker->state = REAP;
           }
         }        
       } 
-      else{ //state == REAP
-        int stat;
-        pid_t result = waitpid(chat_head->cons_pid,&stat,WNOHANG);
-        if (result < 0){
-          perror("waitpid died");
-          break;
-        }
+      // else{ //state == REAP
+      //   int stat;
+      //   pid_t result = waitpid(chat_walker->cons_pid,&stat,WNOHANG);
+      //   if (result < 0){
+      //     perror("waitpid died when consult");
+      //     break;
+      //   }
 
-        else if (result == chat_head->cons_pid){
-          char* key = NULL;
-          char* hash = NULL;
-          if (cons_chat_hantei(chat_head) == 0){
-            key = strdup(chat_head->key);
-            hash = strdup(chat_head->hash);
-          }
+      //   else if (result == chat_walker->cons_pid){
+      //     char* key = NULL;
+      //     char* hash = NULL;
+      //     if (cons_chat_hantei(chat_walker) == 0){
+      //       key = strdup(chat_walker->key);
+      //       hash = strdup(chat_walker->hash);
+      //     }
 
-          Cons_chat *temp = chat_head;
-          chat_head = chat_head->next;
-          if (chat_head == NULL){
-            chat_tail = NULL;
-          }
-          end_a_cons_chat(temp);
+      //     Cons_chat *temp = chat_head;
+      //     chat_head = chat_head->next;
+      //     end_a_cons_chat(temp);
 
-          if (key!=NULL){
-            start_a_cons_chat(hash, key);
-            free(key);
-            free(hash);
-          }
-        }
-      }
+      //     if (key!=NULL){
+      //       start_a_cons_chat(hash, key);
+      //       free(key);
+      //       free(hash);
+      //     }
+      //   }
+      // }
+
+      chat_walker = chat_walker->next;
     }
 
     // TODO: poll parent, and child processes for custom commands.
@@ -258,14 +434,120 @@ int main(int argc, char *argv[]) {
     
 
     // end TODO
+
+    int forker_status;
+    pid_t who_died;
+    while ((who_died = waitpid(-1,&forker_status, WNOHANG)) > 0){
+      child_walker = child_head;
+      while (child_walker != NULL){
+        if (child_walker->pid == who_died){
+          wipe_out_a_child(child_walker);
+          break;
+        }
+        child_walker = child_walker->next;
+      }
+      chat_walker = chat_head;
+      while (chat_walker != NULL){
+        if (chat_walker->cons_pid == who_died){
+          if (cons_chat_hantei(chat_walker) == 0){
+            start_a_cons_chat(chat_walker->hash, chat_walker->key);
+          }
+          end_a_cons_chat(chat_walker);
+          break;
+        }
+        chat_walker = chat_walker->next;
+      }
+    };
+    
   }
 
-  if (chat_head!=NULL){
-    end_a_cons_chat(chat_head);
-  }
-  cleanup_msg(&jud_kara_msg);
-  cleanup_table(&table_start);
+  cleanup_everything();
+  // while (chat_head!=NULL){
+  //   Cons_chat *temp = chat_head;
+  //   chat_head = chat_head->next;
+  //   end_a_cons_chat(temp);
+  // }
+  // cleanup_msg(&jud_kara_msg);
+  // cleanup_table(&table_start);
   exit(0);
+}
+
+void cleanup_everything(){
+  Child *child_walker = child_head;
+  while (child_walker != NULL){
+    if (child_walker->to_child_fd != -1){
+      close(child_walker->to_child_fd);
+      child_walker->to_child_fd = -1;
+    }
+    if (child_walker->from_child_fd != -1){
+      close(child_walker->from_child_fd);
+      child_walker->from_child_fd = -1;
+    }
+
+    child_walker = child_walker->next;
+  }
+  Cons_chat *chat_walker = chat_head;
+  while (chat_walker != NULL){
+    if (chat_walker->recv_fd != -1){
+      close(chat_walker->recv_fd);
+      chat_walker->recv_fd = -1;
+    }
+    if (chat_walker->send_fd != -1){
+      close(chat_walker->send_fd);
+      chat_walker->send_fd = -1;
+    }
+
+    chat_walker = chat_walker->next;
+  }
+
+  while (true){
+    int forker_status;
+    pid_t who_died = waitpid(-1,&forker_status, 0);
+    if (who_died == -1 && errno == ECHILD){
+      break;
+    }
+    child_walker = child_head;
+    while (child_walker != NULL){
+      if (child_walker->pid == who_died){
+        wipe_out_a_child(child_walker);
+        break;
+      }
+      child_walker = child_walker->next;
+    }
+    chat_walker = chat_head;
+    while (chat_walker != NULL){
+      if (chat_walker->cons_pid == who_died){
+        end_a_cons_chat(chat_walker);
+        break;
+      }
+      chat_walker = chat_walker->next;
+    }
+  }
+
+  cleanup_msg(&jud_kara_msg);
+  while (jud_out_head != NULL){
+    Outputer *temp = jud_out_head;
+    jud_out_head = jud_out_head->next;
+    cleanup_outputer(temp);
+  }
+  if (!is_sp_main){
+    cleanup_msg(&par_kara_msg);
+    while (par_out_head != NULL){
+      Outputer *temp = par_out_head;
+      par_out_head = par_out_head->next;
+      cleanup_outputer(temp);
+    }
+  }
+
+  cleanup_table(&table_start);
+  // cleanup_lookup(lookup_head);
+  while (lookup_head != NULL){
+    Lookupreq *temp = lookup_head;
+    lookup_head = lookup_head->next;
+    free(temp->hash);
+    free(temp);
+  }
+  return;
 }
 
 int command_handler(Command *cmd) {
@@ -295,9 +577,140 @@ int command_handler(Command *cmd) {
   return 0;
 }
 
+int summon_new_child(char *cmd, char *rly){
+  int pc_pipe_fd[2], cp_pipe_fd[2]; //pc: parent write to child
+
+  if (pipe(pc_pipe_fd)<0){
+    perror("child pipe died");
+    return -1;
+  }
+  if (pipe(cp_pipe_fd)<0){
+    close(pc_pipe_fd[0]); close(pc_pipe_fd[1]);
+
+    perror("child pipe died");
+    return -1;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0){
+    perror("consult fork died");
+    close(pc_pipe_fd[0]); close(cp_pipe_fd[1]);
+    close(pc_pipe_fd[1]); close(cp_pipe_fd[0]);
+    return -1;
+  }
+
+  if (pid == 0){ // Child
+    close(pc_pipe_fd[1]); close(cp_pipe_fd[0]); //fd[0] is read, [1] is write
+    dup2(pc_pipe_fd[0], STDIN_FILENO); dup2(cp_pipe_fd[1], STDOUT_FILENO);
+    close(pc_pipe_fd[0]); close(cp_pipe_fd[1]);
+
+    // int cmd_fifo_len = strlen(cmd) + 9;
+    // int rly_fifo_len = strlen(rly) + 9;
+    // char *cmd_fifo = (char *)malloc(cmd_fifo_len +1);
+    // char *rly_fifo = (char *)malloc(rly_fifo_len +1);
+    // snprintf(cmd_fifo, cmd_fifo_len, "CMD_FIFO=%s", cmd);
+    // snprintf(rly_fifo, rly_fifo_len, "RLY_FIFO=%s", rly);
+    // char *envp[] = {cmd_fifo, rly_fifo, NULL};
+    // char *argv[] = {"./sp", NULL};
+    // execve("./sp", argv, envp);
+
+    setenv("CMD_FIFO", cmd, 1);
+    setenv("RLY_FIFO", rly, 1);
+    execl("./sp", "./sp", (char *)NULL);
+
+
+    perror("Child exec died");
+    // free(cmd_fifo); free(rly_fifo);
+
+    _exit(1);
+    return -1;
+  }
+  else{ //Parent
+    close(pc_pipe_fd[0]); close(cp_pipe_fd[1]);
+    fcntl(pc_pipe_fd[1], F_SETFD, FD_CLOEXEC);
+    fcntl(cp_pipe_fd[0], F_SETFD, FD_CLOEXEC);
+    
+    Child *new_child = (Child *)malloc(sizeof(Child));
+    new_child->pid = pid;
+    new_child->to_child_fd = pc_pipe_fd[1];
+    new_child->from_child_fd = cp_pipe_fd[0];
+
+    Message *new_res = (Message *)malloc(sizeof(Message));
+    init_msg(new_res);
+    new_child->msg_from_child = new_res;
+
+    int flags;
+    flags = fcntl(new_child->to_child_fd, F_GETFL, 0);
+    fcntl(new_child->to_child_fd, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(new_child->from_child_fd, F_GETFL, 0);
+    fcntl(new_child->from_child_fd, F_SETFL, flags | O_NONBLOCK);
+    new_child->out_to_child_head = NULL;
+    new_child->out_to_child_tail = NULL;
+    
+    new_child->rec_poller_id = -1;
+    new_child->sen_poller_id = -1;
+
+    new_child->next = child_head;
+
+    child_head = new_child;    
+  }
+
+  return 0;
+}
+
+int wipe_out_a_child(Child *c){
+  if (c == NULL){
+    return 0;
+  }
+
+  if (c == child_head){
+    child_head = c->next;
+  }
+  else{
+    Child *pre = child_head;
+    Child *child_walker = child_head->next;
+    while (child_walker != NULL){
+      if (child_walker == c){
+        pre->next = child_walker->next;
+        break;
+      }
+      pre = pre->next;
+      child_walker = child_walker->next;
+    }
+  }
+
+  if (c->to_child_fd != -1){
+    close(c->to_child_fd);
+  }
+  if (c->from_child_fd != -1){
+    close(c->from_child_fd);
+  }
+  cleanup_msg(c->msg_from_child);
+  while (c->out_to_child_head != NULL){
+    Outputer *temp2 = c->out_to_child_head;
+    c->out_to_child_head = c->out_to_child_head->next;
+    cleanup_outputer(temp2);
+  }
+  free(c);
+  return 0;
+}
+
 int create_handler(char *buf, size_t len) {
   // TODO: Implement the CREATE command handler.
-  return 0;
+  fprintf(stderr,"Not err but, STORE [%.*s]\n", (int)len, buf);
+  if (len < 10){
+    return -1;
+  }
+  size_t token_len = 7;
+
+  while (token_len < len && buf[token_len] != ' ') {
+    token_len++;
+  }
+
+  buf[token_len] = '\0';
+  char *cmd_fifo = &(buf[7]); 
+  char *rly_fifo = &(buf[token_len+1]);
+  return summon_new_child(cmd_fifo,rly_fifo);
 }
 
 int store_handler(char *buf, size_t len) {
@@ -361,6 +774,8 @@ int start_a_cons_chat(char *hash, char *key){
 
   pid_t pid = fork();
   if (pid < 0){
+    close(pc_pipe_fd[0]); close(pc_pipe_fd[1]);
+    close(pc_pipe_fd[1]); close(pc_pipe_fd[0]);
     perror("consult fork died");
     return -1;
   }
@@ -371,6 +786,9 @@ int start_a_cons_chat(char *hash, char *key){
     close(pc_pipe_fd[0]); close(cp_pipe_fd[1]);
 
     char *consult = getenv("JUDGE_CONSULTANT");
+    if (consult == NULL){
+      return -1;
+    }
     execl(consult,"consultant",NULL);
 
     perror("consult exec died");
@@ -409,6 +827,8 @@ int start_a_cons_chat(char *hash, char *key){
     fcntl(new_cons->send_fd, F_SETFL, flags | O_NONBLOCK);
     flags = fcntl(new_cons->recv_fd, F_GETFL, 0);
     fcntl(new_cons->recv_fd, F_SETFL, flags | O_NONBLOCK);
+    new_cons->rec_poller_id = -1; 
+    new_cons->sen_poller_id = -1;
     new_cons->cons_pid = pid;
     new_cons->send_first = new_send;
     new_cons->key = new_key;
@@ -416,16 +836,9 @@ int start_a_cons_chat(char *hash, char *key){
     new_cons->cons_res = new_res;
     new_cons->cons_res_line = NULL;
     new_cons->state = SEND_KEY;
-    new_cons->next = NULL;
+    new_cons->next = chat_head;
 
-    if (chat_head == NULL){
-      chat_head = new_cons;
-      chat_tail = new_cons;
-    }
-    else{
-      chat_tail->next = new_cons;
-      chat_tail = new_cons;
-    }
+    chat_head = new_cons;
     
     return 0;
     /*
@@ -472,7 +885,24 @@ int start_a_cons_chat(char *hash, char *key){
 
 void end_a_cons_chat(Cons_chat *c){
   if (c == NULL){
-    return ;
+    return;
+  }
+
+  if (c == chat_head){
+    chat_head = chat_head->next;
+  }
+  else if (chat_head != NULL){
+    Cons_chat *pre = chat_head;
+    Cons_chat *chat_walker = chat_head->next;
+    while (chat_walker != NULL){
+      if (chat_walker == c){
+        pre->next = c->next;
+        break;
+      }
+
+      pre = pre->next;
+      chat_walker = chat_walker->next;
+    }
   }
 
   if (c->send_fd >= 0){
@@ -506,7 +936,22 @@ int cons_chat_hantei(Cons_chat *c){
   }
 
   if (strncmp(c->cons_res_line, "Ok: ", 4) == 0){
-    add_fetch_outputer(&jud_out_head, &jud_out_tail, c->hash, (c->cons_res_line)+4);
+    // Lookupreq *lookup_walker = lookup_head;
+    // while(lookup_walker != NULL){
+    //   if (strcmp(c->hash, lookup_walker->hash) == 0){
+    //     if (lookup_walker->target_child == NULL){
+    //       add_fetch_outputer(&jud_out_head, &jud_out_tail, c->hash, (c->cons_res_line)+4);
+    //     }
+    //     else{
+    //       add_fetch_outputer(&(lookup_walker->target_child->out_to_child_head), 
+    //       &(lookup_walker->target_child->out_to_child_tail), c->hash, (c->cons_res_line)+4);
+    //     }
+    //     break;
+    //   }
+    //   lookup_walker= lookup_walker->next;
+    // }
+    (void) fetch_thing_to_where_hantei(c->hash, (c->cons_res_line)+4);
+
     return 1;
   }
   else{
@@ -515,13 +960,86 @@ int cons_chat_hantei(Cons_chat *c){
   }
 }
 
-int get_ans_from_ue(char *hash, char *key){
+int fetch_thing_to_where_hantei(char *hash, char *val){
+  if (lookup_head == NULL){
+    return 0;
+  }
+
+  if (strcmp(hash, lookup_head->hash) == 0){
+    if (lookup_head->target_child == NULL){
+      add_fetch_outputer(&jud_out_head, &jud_out_tail, hash, val);
+    }
+    else{
+      add_fetch_outputer(&(lookup_head->target_child->out_to_child_head), 
+      &(lookup_head->target_child->out_to_child_tail), hash, val);
+    }
+    Lookupreq *temp = lookup_head;
+    lookup_head = lookup_head->next;
+    free(temp->hash);
+    free(temp);
+
+
+    return 0;
+  }
+
+  Lookupreq *pre = lookup_head;
+  Lookupreq *lookup_walker = lookup_head->next;
+  while(lookup_walker != NULL){
+    if (strcmp(hash, lookup_walker->hash) == 0){
+      if (lookup_walker->target_child == NULL){
+        add_fetch_outputer(&jud_out_head, &jud_out_tail, hash, val);
+      }
+      else{
+        add_fetch_outputer(&(lookup_walker->target_child->out_to_child_head), 
+        &(lookup_walker->target_child->out_to_child_tail), hash, val);
+      }
+      pre->next = lookup_walker->next;
+      free(lookup_walker->hash);
+      free(lookup_walker);
+      break;
+    }
+    pre = pre->next;
+    lookup_walker= lookup_walker->next;
+  }
+
+  return 0;
+}
+
+int make_new_request(char *hash, Child *req_child){
+  Lookupreq *new_lookup = (Lookupreq *)malloc(sizeof(Lookupreq));
+
+  char *new_hash = (char *)malloc(strlen(hash)+1);
+  memcpy(new_hash, hash, strlen(hash));
+  new_hash[strlen(hash)] = '\0';
+
+  new_lookup->hash = new_hash;
+  new_lookup->target_child = req_child;
+  new_lookup->next = lookup_head;
+  lookup_head = new_lookup;
+
+  return 0;
+}
+
+int get_ans_from_ue(char *hash, char *key, Child* req_child){
   char *is_root = getenv("CMD_FIFO");
   if (is_root == NULL){ //NULL means is root
+    (void) make_new_request(hash,req_child);
     return start_a_cons_chat(hash, key);
   }
   else{ // not sp main, should ask parent
+    (void) make_new_request(hash,req_child);
+    return add_fetch_outputer(&par_out_head, &par_out_tail, hash, key);
+  }
+}
 
+int check_a_child_req(char *hash, char *key, Child* req_child){
+  char *if_val = NULL;
+  int success_search = search_in_table(&table_start, key, &(if_val));
+  if (success_search == 0 && if_val!=NULL){
+    return add_fetch_outputer(&(req_child->out_to_child_head), &(req_child->out_to_child_tail), hash, if_val);
+  }
+  else{
+    return get_ans_from_ue(hash, key, req_child);
   }
 }
 
@@ -541,7 +1059,7 @@ int fetch_handler(char *buf, size_t len) {
     // return direct_send_fetch_result(if_val);
   }
   else if (success_search == 0 && if_val == NULL){
-    return get_ans_from_ue(hash,key);
+    return get_ans_from_ue(hash,key,NULL);
   }
   else{
     return -1;

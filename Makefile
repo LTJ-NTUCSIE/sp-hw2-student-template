@@ -25,7 +25,7 @@ sp: $(OBJECTS)
 
 .PHONY: clean
 clean:
-	rm -f sp
+	rm -f sp $(OBJECTS)
 
 # $(call copy_submission,DIR) is a shell command that copies this Makefile and
 # SUBMISSION_FILES into DIR, keeping their relative paths. On a bad entry it

@@ -70,6 +70,7 @@ typedef struct outputer{
 int try_to_write(Outputer *o, int fd);
 int complete_write(Outputer **s, Outputer **e);
 int add_fetch_outputer(Outputer **head, Outputer **tail, char *hash, char* val);
+int cleanup_outputer(Outputer *o);
 
 
 //-----------------------For lookup table-----------------------------
@@ -89,14 +90,42 @@ int kick_table_entry(Table_entry **table_start, char* key);
 int search_in_table(Table_entry **table_start, char* key, char** if_val);
 void cleanup_table(Table_entry **table_start);
 
+//--------------------For child------------------------------------
+typedef struct child{
+  pid_t pid;
+
+  int to_child_fd;
+  int from_child_fd;
+  int rec_poller_id;
+  int sen_poller_id;
+
+  Message *msg_from_child;
+  Outputer *out_to_child_head;
+  Outputer *out_to_child_tail;
+
+  struct child *next;
+}Child;
+
+typedef struct lookupreq{
+  char *hash; //as the req id since hash doesn't repeat
+  // char *key;
+  Child *target_child;
+  struct lookupreq *next;
+}Lookupreq;
+
+int summon_new_child(char *cmd, char *rly);
+int wipe_out_a_child(Child *c);
+int check_a_child_req(char *hash, char *key, Child* req_child);
+
 //----------------Consultant comm-------------------
 //--------------------------------------------------
 typedef struct consultant_chat{
   pid_t cons_pid;
-  int reply_child;
 
   int send_fd;
   int recv_fd;
+  int sen_poller_id;
+  int rec_poller_id;
 
   char *key;
   char *hash;
@@ -110,6 +139,11 @@ typedef struct consultant_chat{
 void end_a_cons_chat(Cons_chat *c);
 int start_a_cons_chat(char *hash, char *key);
 int cons_chat_hantei(Cons_chat *c);
-int get_ans_from_ue(char *hash, char *key);
+int get_ans_from_ue(char *hash, char *key, Child* req_child);
+
+//---------------------Zatsu na things--------------------------
+//-----------------------------------------------------------
+void cleanup_everything();
+int fetch_thing_to_where_hantei(char *hash, char *val);
 
 #endif // SP_H
