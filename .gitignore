@@ -66,3 +66,5 @@ dkms.conf
 # Self setting
 *.pdf
 .vscode
+ws1*
+err*

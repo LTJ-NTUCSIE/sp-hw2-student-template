@@ -190,21 +190,21 @@ int pop_command(Message *m, Command *c) {
     // return 1;
 }
 
-int write_msg_to_fd(int fd, char *msg){
-  size_t msg_len = strlen(msg);
-  size_t total = 0;
-  while (total < msg_len) {
-    ssize_t n = write(fd, msg + total, msg_len - total);
-    if (n > 0) {
-        total += (size_t)n;
-    } else if (n < 0 && errno == EINTR) {
-        continue;  // retry
-    } else {
-        return -1; // real err
-    }
-  }
-  return 0;
-}
+// int write_msg_to_fd(int fd, char *msg){
+//   size_t msg_len = strlen(msg);
+//   size_t total = 0;
+//   while (total < msg_len) {
+//     ssize_t n = write(fd, msg + total, msg_len - total);
+//     if (n > 0) {
+//         total += (size_t)n;
+//     } else if (n < 0 && errno == EINTR) {
+//         continue;  // retry
+//     } else {
+//         return -1; // real err
+//     }
+//   }
+//   return 0;
+// }
 
 int pop_line(Message *m, char **res_line){
   char *newline = memchr(m->not_processed_buf, '\n', m->not_processed_len);

@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <sys/types.h>
+#include <poll.h>
 
 typedef struct {
   char *buf;
@@ -20,7 +21,8 @@ int update_handler(char *buf, size_t len);
 
 // handler stats :(
 enum handler_status {
-  H_ERR = -1,
+  H_ERR = -2,
+  H_INVAL = -1,
   H_OK = 0,
   H_EXIT = 1
 };
@@ -103,6 +105,7 @@ typedef struct child{
   Outputer *out_to_child_head;
   Outputer *out_to_child_tail;
 
+  enum {OKAY, DIED} state;
   struct child *next;
 }Child;
 
@@ -145,5 +148,9 @@ int get_ans_from_ue(char *hash, char *key, Child* req_child);
 //-----------------------------------------------------------
 void cleanup_everything();
 int fetch_thing_to_where_hantei(char *hash, char *val);
+int init_poller(struct pollfd **poller, int *poller_n, int* poller_capa);
+void cleanup_poller(struct pollfd **poller, int *poller_n, int* poller_capa);
+int expand_poller(struct pollfd **poller, int* poller_capa);
+int ensure_poller_is_enough(struct pollfd **poller, int* poller_n, int* poller_capa);
 
 #endif // SP_H
